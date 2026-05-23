@@ -48,17 +48,9 @@ jobs:
           yaspeed.py
 
       # ── rename to platform-specific name ────────────────────────────────
-      - name: Rename binary (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: mv dist/yaspeed.exe dist/${{ matrix.bin_name }}
-
-      - name: Rename binary (macOS)
-        if: runner.os == 'macOS'
-        run: mv dist/yaspeed dist/${{ matrix.bin_name }}
-
-      - name: Rename binary (Linux)
-        if: runner.os == 'Linux'
+      # Windows already produces dist/yaspeed.exe — no rename needed
+      - name: Rename binary (macOS / Linux)
+        if: runner.os != 'Windows'
         run: mv dist/yaspeed dist/${{ matrix.bin_name }}
 
       - name: Upload artifact
