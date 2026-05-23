@@ -1,0 +1,122 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  # ── build on each platform ─────────────────────────────────────────────────
+  build:
+    name: Build · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            bin_name: yaspeed.exe
+          - os: macos-latest
+            bin_name: yaspeed-macos
+          - os: ubuntu-latest
+            bin_name: yaspeed-linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: pip install pyinstaller requests rich
+
+      - name: Build binary
+        run: >
+          pyinstaller
+          --onefile
+          --name yaspeed
+          --collect-all rich
+          yaspeed.py
+
+      # ── rename to platform-specific name ────────────────────────────────
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: mv dist/yaspeed.exe dist/${{ matrix.bin_name }}
+
+      - name: Rename binary (macOS)
+        if: runner.os == 'macOS'
+        run: mv dist/yaspeed dist/${{ matrix.bin_name }}
+
+      - name: Rename binary (Linux)
+        if: runner.os == 'Linux'
+        run: mv dist/yaspeed dist/${{ matrix.bin_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin_name }}
+          path: dist/${{ matrix.bin_name }}
+
+  # ── assemble release ───────────────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Make Unix binaries executable
+        run: chmod +x dist/yaspeed-macos dist/yaspeed-linux
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: "yaspeed ${{ github.event.inputs.tag || github.ref_name }}"
+          body: |
+            ## ⚡ yaspeed — CLI speed test via yandex.ru/internet
+
+            No Python required — just download & run.
+
+            ---
+
+            ### 🪟 Windows — PowerShell (one line)
+            ```powershell
+            irm https://github.com/Tovarish666/yaspeed/releases/latest/download/yaspeed.exe -OutFile yaspeed.exe; .\yaspeed.exe
+            ```
+
+            ### 🍎 macOS
+            ```bash
+            curl -fsSL https://github.com/Tovarish666/yaspeed/releases/latest/download/yaspeed-macos -o yaspeed && chmod +x yaspeed && ./yaspeed
+            ```
+            > First run: if macOS blocks it → System Settings → Privacy & Security → **Allow Anyway**
+
+            ### 🐧 Linux
+            ```bash
+            curl -fsSL https://github.com/Tovarish666/yaspeed/releases/latest/download/yaspeed-linux -o yaspeed && chmod +x yaspeed && ./yaspeed
+            ```
+
+            ---
+            ### Python (any OS, Python 3.7+)
+            ```bash
+            pip install requests rich && python yaspeed.py
+            ```
+          files: |
+            dist/yaspeed.exe
+            dist/yaspeed-macos
+            dist/yaspeed-linux
+          generate_release_notes: false

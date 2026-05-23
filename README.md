@@ -2,7 +2,7 @@
 
 CLI speed test using **yandex.ru/internet** backend — an alternative to the blocked Speedtest CLI.
 
-Works on **Windows / macOS / Linux** | Python **3.7+**
+Works on **Windows / macOS / Linux** · Python **3.7+** · No Python needed for pre-built binaries
 
 ```
   ╔══════════════════════════════════════╗
@@ -32,15 +32,46 @@ Works on **Windows / macOS / Linux** | Python **3.7+**
  ╰──────────────────────────────────────────╯
 ```
 
-## Installation
+---
 
-```bash
-git clone https://github.com/YOUR_USERNAME/yaspeed.git
-cd yaspeed
-pip install -r requirements.txt   # or just run — deps auto-install
+## Quick Install — no Python required
+
+Download a single binary from [**Releases**](https://github.com/Tovarish666/yaspeed/releases/latest) and run it.
+
+### 🪟 Windows — PowerShell
+```powershell
+irm https://github.com/Tovarish666/yaspeed/releases/latest/download/yaspeed.exe -OutFile yaspeed.exe; .\yaspeed.exe
 ```
 
-No install needed — single file, runs anywhere.
+### 🍎 macOS
+```bash
+curl -fsSL https://github.com/Tovarish666/yaspeed/releases/latest/download/yaspeed-macos -o yaspeed && chmod +x yaspeed && ./yaspeed
+```
+> **First run:** if macOS says "cannot verify developer" → open **System Settings → Privacy & Security → Allow Anyway**
+
+### 🐧 Linux
+```bash
+curl -fsSL https://github.com/Tovarish666/yaspeed/releases/latest/download/yaspeed-linux -o yaspeed && chmod +x yaspeed && ./yaspeed
+```
+
+---
+
+## Install via Python (any OS, Python 3.7+)
+
+Dependencies are **auto-installed silently** on first run — no manual `pip install` needed.
+
+```bash
+# clone and run
+git clone https://github.com/Tovarish666/yaspeed.git
+cd yaspeed
+python yaspeed.py
+
+# or just download the single file
+curl -O https://raw.githubusercontent.com/Tovarish666/yaspeed/main/yaspeed.py
+python yaspeed.py
+```
+
+---
 
 ## Usage
 
@@ -70,6 +101,9 @@ python yaspeed.py --json > result.json
 
 # Test a VPN tunnel
 python yaspeed.py --interface tun0 --threads 6
+
+# Show version
+python yaspeed.py --version
 ```
 
 ## Options
@@ -84,6 +118,7 @@ python yaspeed.py --interface tun0 --threads 6
 | `--no-download` | | — | Skip download test |
 | `--no-upload` | | — | Skip upload test |
 | `--json` | | — | Machine-readable JSON output |
+| `--version` | `-V` | — | Show version and exit |
 
 ## JSON output example
 
@@ -123,11 +158,9 @@ python yaspeed.py --interface "Wi-Fi"
 ## Requirements
 
 - Python 3.7+
-- `requests` ≥ 2.28
-- `rich` ≥ 13.0
+- `requests` ≥ 2.28  *(auto-installed)*
+- `rich` ≥ 13.0  *(auto-installed)*
 - *(optional)* `netifaces` ≥ 0.11 — cross-platform interface resolution
-
-Dependencies are auto-installed on first run if missing.
 
 ## Why yaspeed?
 

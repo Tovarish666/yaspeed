@@ -2,13 +2,14 @@
 """
 yaspeed — CLI speed test via yandex.ru/internet API
 Supports: Windows / macOS / Linux | Python 3.7+
+No external dependencies required — auto-installed on first run.
 
 Usage:
-  python yaspeed.py                        # run full test
+  python yaspeed.py                        # full test
   python yaspeed.py --source-ip 1.2.3.4   # bind to specific IP
   python yaspeed.py --interface eth0       # bind to interface (Linux/macOS)
   python yaspeed.py --interface "Wi-Fi"    # bind to interface (Windows)
-  python yaspeed.py --threads 8 --duration 15
+  python yaspeed.py -t 8 -d 15            # 8 threads, 15 sec
   python yaspeed.py --no-upload
   python yaspeed.py --json > result.json
 """
@@ -31,45 +32,63 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+__version__ = "1.1.0"
+
 
 # ─── auto-install dependencies ────────────────────────────────────────────────
 def _ensure_deps() -> None:
-    missing = []
+    """Silently check and install missing dependencies.
+
+    Skipped automatically when running as a frozen binary (PyInstaller),
+    since all deps are bundled inside the executable.
+    """
+    # Running as a compiled binary — deps are already bundled, skip check
+    if getattr(sys, "frozen", False):
+        return
+
+    missing: List[str] = []
     try:
         import requests  # noqa: F401
     except ImportError:
-        missing.append("requests")
+        missing.append("requests>=2.28")
     try:
-        from rich.console import Console  # noqa: F401
+        import rich  # noqa: F401
     except ImportError:
-        missing.append("rich")
+        missing.append("rich>=13.0")
 
     if not missing:
-        return
+        return  # all good, no output
 
     print(f"[yaspeed] Installing: {', '.join(missing)} …", flush=True)
-    cmd = [sys.executable, "-m", "pip", "install"] + missing + ["-q"]
 
-    # Linux externally-managed Python (e.g. Debian/Ubuntu system python3)
-    if platform.system() == "Linux":
+    base_cmd = [sys.executable, "-m", "pip", "install", "-q"] + missing
+
+    def _run(extra: List[str] = []) -> bool:
         try:
             subprocess.check_call(
-                cmd + ["--break-system-packages"],
+                base_cmd + extra,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            return
+            return True
         except subprocess.CalledProcessError:
-            pass
+            return False
 
-    # Universal fallback
-    try:
-        subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        subprocess.check_call(
-            cmd + ["--user"],
-            stdout=subprocess.DEVNULL,
-        )
+    # Debian/Ubuntu system python3 may require --break-system-packages
+    if platform.system() == "Linux":
+        if _run(["--break-system-packages"]) or _run():
+            return
+
+    # macOS / Windows / generic Linux
+    if _run() or _run(["--user"]):
+        return
+
+    print(
+        "[yaspeed] Could not auto-install dependencies.\n"
+        f"  Please run manually:  pip install {' '.join(missing)}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 _ensure_deps()
@@ -98,7 +117,7 @@ HEADERS: Dict[str, str] = {
     "Pragma":        "no-cache",
 }
 
-_SYSTEM = platform.system()  # "Windows" | "Darwin" | "Linux"
+_SYSTEM = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -122,12 +141,15 @@ def _bar(fraction: float, width: int = 30) -> str:
 
 # ─── cross-platform interface → IP resolution ─────────────────────────────────
 def resolve_interface_ip(interface: str) -> str:
+    """Return the IPv4 address bound to *interface*.
+
+    Resolution order:
+      1. netifaces (optional package — most reliable, all platforms)
+      2. Linux  — fcntl/ioctl
+      3. macOS  — ifconfig
+      4. Windows — ipconfig
     """
-    Return the IPv4 address bound to *interface*.
-    Works on Linux, macOS, and Windows.
-    Prefers the optional `netifaces` package; falls back to OS-specific methods.
-    """
-    # 1) netifaces (optional, most reliable)
+    # 1) netifaces — optional but preferred
     try:
         import netifaces  # type: ignore
         addrs = netifaces.ifaddresses(interface)
@@ -141,8 +163,7 @@ def resolve_interface_ip(interface: str) -> str:
     # 2) Linux: fcntl + ioctl
     if _SYSTEM == "Linux":
         try:
-            import fcntl
-            import struct
+            import fcntl, struct
             SIOCGIFADDR = 0x8915
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -166,12 +187,11 @@ def resolve_interface_ip(interface: str) -> str:
             for line in out.splitlines():
                 parts = line.split()
                 if "inet" in parts:
-                    idx = parts.index("inet")
-                    return parts[idx + 1]
+                    return parts[parts.index("inet") + 1]
         except Exception:
             pass
 
-    # 4) Windows: ipconfig — match adapter name (case-insensitive prefix)
+    # 4) Windows: ipconfig — case-insensitive adapter name match
     if _SYSTEM == "Windows":
         try:
             out = subprocess.check_output(
@@ -195,8 +215,8 @@ def resolve_interface_ip(interface: str) -> str:
 
     raise RuntimeError(
         f"Cannot resolve IP for interface '{interface}' on {_SYSTEM}.\n"
-        "  Tip: install `pip install netifaces` for cross-platform support,\n"
-        "  or use --source-ip <IP> directly."
+        "  Tip: pip install netifaces  — gives cross-platform interface support\n"
+        "  Or use:  --source-ip <IP>  to pass the IP directly."
     )
 
 
@@ -228,25 +248,28 @@ class SourceAddressAdapter(requests.adapters.HTTPAdapter):
 class YaSpeed:
     def __init__(
         self,
-        source_ip: Optional[str] = None,
-        interface: Optional[str] = None,
-        threads: int = 4,
-        duration: int = 10,
+        source_ip:  Optional[str] = None,
+        interface:  Optional[str] = None,
+        threads:    int = 4,
+        duration:   int = 10,
         ping_count: int = 12,
     ) -> None:
         self.threads    = threads
         self.duration   = duration
         self.ping_count = ping_count
 
-        self._bytes: int   = 0
-        self._lock         = threading.Lock()
-        self._running      = False
-        self._payload      = os.urandom(1024 * 1024)  # 1 MB random data
+        self._bytes:   int  = 0
+        self._lock          = threading.Lock()
+        self._running       = False
+        self._payload       = os.urandom(1024 * 1024)  # 1 MB random data for upload
 
+        # Resolve interface name → source IP (if requested)
         if interface:
             try:
                 source_ip = resolve_interface_ip(interface)
-                console.print(f"  [yellow]Interface [bold]{interface}[/bold] → {source_ip}[/yellow]")
+                console.print(
+                    f"  [yellow]Interface [bold]{interface}[/bold] → {source_ip}[/yellow]"
+                )
             except RuntimeError as exc:
                 console.print(f"[yellow]⚠ {exc}[/yellow]")
 
@@ -289,7 +312,10 @@ class YaSpeed:
     def measure_latency(
         self, probes: List[dict]
     ) -> Tuple[str, float, float, float, float]:
-        """Returns (host, avg_ms, min_ms, max_ms, jitter_ms)."""
+        """Pick the fastest probe, measure ping N times.
+
+        Returns: (host, avg_ms, min_ms, max_ms, jitter_ms)
+        """
         best_url: Optional[str] = None
         best_lat = float("inf")
 
@@ -316,8 +342,9 @@ class YaSpeed:
                 pass
 
         if not samples:
-            raise RuntimeError("No latency data collected")
+            raise RuntimeError("No latency samples collected")
 
+        # Trim 10% outliers from each end for a more stable average
         samples.sort()
         trim    = max(1, len(samples) // 10)
         trimmed = samples[trim:-trim] if len(samples) > 2 * trim else samples
@@ -328,6 +355,7 @@ class YaSpeed:
 
     # ── transfer workers ──────────────────────────────────────────────────────
     def _dl_worker(self, url: str) -> None:
+        """Download worker — streams data until _running is False."""
         while self._running:
             try:
                 with self._session.get(_add_rid(url), stream=True, timeout=10) as r:
@@ -343,6 +371,7 @@ class YaSpeed:
                 time.sleep(0.1)
 
     def _ul_worker(self, url: str, size_bytes: int = 52_428_800) -> None:
+        """Upload worker — sends chunks until _running is False or size reached."""
         def _gen():
             sent = 0
             while sent < size_bytes and self._running:
@@ -359,16 +388,10 @@ class YaSpeed:
                 time.sleep(0.1)
 
     # ── progress bar runner ───────────────────────────────────────────────────
-    def _run_test(
-        self,
-        icon: str,
-        color: str,
-        worker,
-        *worker_args,
-    ) -> float:
+    def _run_test(self, icon: str, color: str, worker, *worker_args) -> float:
+        """Spawn N workers, show a live progress bar, return average Mbps."""
         self._bytes   = 0
         self._running = True
-        snapshot      = 0
 
         pool = ThreadPoolExecutor(max_workers=self.threads)
         for _ in range(self.threads):
@@ -384,11 +407,8 @@ class YaSpeed:
                 with self._lock:
                     current = self._bytes
 
-                instant_mbps = (current - snapshot) * 8 / 1_000_000 / 0.2
-                snapshot     = current
-                avg_mbps     = current * 8 / 1_000_000 / elapsed if elapsed > 0 else 0
-                frac         = elapsed / self.duration
-                bar          = _bar(frac)
+                avg_mbps = current * 8 / 1_000_000 / elapsed if elapsed > 0 else 0
+                bar      = _bar(elapsed / self.duration)
 
                 print(
                     f"\r  {icon} {bar}  {avg_mbps:>8.2f} Мбит/с"
@@ -412,13 +432,13 @@ class YaSpeed:
     # ── probe selection ───────────────────────────────────────────────────────
     @staticmethod
     def _pick_probe(
-        config: dict,
+        config:  dict,
         section: str,
-        host: str,
-        hint: str = "",
+        host:    str,
+        hint:    str = "",
     ) -> Tuple[Optional[str], int]:
-        probes = config.get(section, {}).get("probes", [])
-        # Prefer probes on the same host that was chosen for latency
+        """Return the best (url, size) probe for a given test section."""
+        probes     = config.get(section, {}).get("probes", [])
         candidates = [p for p in probes if host in p.get("url", "")] or probes
         if hint:
             for p in candidates:
@@ -428,7 +448,7 @@ class YaSpeed:
             return candidates[0]["url"], int(candidates[0].get("size", 0))
         return None, 0
 
-    # ── main ──────────────────────────────────────────────────────────────────
+    # ── main run ──────────────────────────────────────────────────────────────
     def run(
         self,
         skip_upload:   bool = False,
@@ -440,14 +460,14 @@ class YaSpeed:
         if not output_json:
             _print_banner(self._source_ip)
 
-        # IP
+        # Resolve public IP
         with console.status("[cyan]Определяю IP…[/cyan]"):
             ip = self.fetch_ip()
         if not output_json:
             console.print(f"  [cyan]IP:[/cyan] [bold]{ip}[/bold]")
         result["ip"] = ip
 
-        # probes config
+        # Fetch probe config from Yandex
         with console.status("[cyan]Получаю серверы…[/cyan]"):
             try:
                 config = self.fetch_config()
@@ -455,7 +475,7 @@ class YaSpeed:
                 console.print(f"[red]Config error: {exc}[/red]")
                 return {}
 
-        # latency
+        # ── latency ─────────────────────────────────────────────────────────
         lat_probes = config.get("latency", {}).get("probes", [])
         if not output_json:
             console.print("\n[bold yellow]● Измерение задержки…[/bold yellow]")
@@ -480,7 +500,7 @@ class YaSpeed:
             jitter_ms=round(jitter, 2),
         )
 
-        # download
+        # ── download ─────────────────────────────────────────────────────────
         if not skip_download:
             dl_url, _ = self._pick_probe(config, "download", host)
             if dl_url:
@@ -495,7 +515,7 @@ class YaSpeed:
             else:
                 console.print("[yellow]⚠ No download probe URL found[/yellow]")
 
-        # upload
+        # ── upload ───────────────────────────────────────────────────────────
         if not skip_upload:
             ul_url, ul_size = self._pick_probe(config, "upload", host, "52428800")
             if not ul_url:
@@ -509,7 +529,7 @@ class YaSpeed:
                 )
                 if not output_json:
                     console.print(
-                        f"  [green]✓[/green] Upload:   [bold magenta]{_fmt_speed(mbps)}[/bold magenta]"
+                        f"  [green]✓[/green] Upload: [bold magenta]{_fmt_speed(mbps)}[/bold magenta]"
                     )
                 result["upload_mbps"] = round(mbps, 2)
             else:
@@ -532,17 +552,25 @@ def _print_banner(source_ip: Optional[str]) -> None:
     console.print()
 
 
+def _quality(mbps: float) -> str:
+    if mbps >= 500: return "🚀 Огонь"
+    if mbps >= 100: return "✅ Отлично"
+    if mbps >= 50:  return "👍 Хорошо"
+    if mbps >= 10:  return "🆗 Норм"
+    return "🐌 Медленно"
+
+
 def _print_results(result: dict) -> None:
     console.print()
     console.rule("[bold white]Результаты[/bold white]")
 
     t = Table(box=box.ROUNDED, show_header=False, padding=(0, 2))
-    t.add_column("k", style="dim",       justify="right")
-    t.add_column("v", style="bold white", justify="left")
-    t.add_column("i", style="dim",        justify="left")
+    t.add_column("k", style="dim",        justify="right")
+    t.add_column("v", style="bold white",  justify="left")
+    t.add_column("i", style="dim",         justify="left")
 
-    if "ip"     in result: t.add_row("🌐 IP",      result["ip"],      "")
-    if "server" in result: t.add_row("🖥  Сервер",  result["server"],  "")
+    if "ip"     in result: t.add_row("🌐 IP",     result["ip"],     "")
+    if "server" in result: t.add_row("🖥  Сервер", result["server"], "")
 
     if "ping_ms" in result:
         t.add_row(
@@ -552,12 +580,10 @@ def _print_results(result: dict) -> None:
         )
     if "jitter_ms" in result:
         j = result["jitter_ms"]
-        c = "green" if j < 5 else "yellow" if j < 20 else "red"
-        t.add_row(
-            "〰  Джиттер",
-            f"[{c}]{j:.1f} мс[/{c}]",
-            "✅ Stable" if j < 2 else "👍 Good" if j < 5 else "⚠ Unstable" if j < 20 else "🔴 Bad",
-        )
+        c     = "green" if j < 5 else "yellow" if j < 20 else "red"
+        label = "✅ Stable" if j < 2 else "👍 Good" if j < 5 else "⚠ Unstable" if j < 20 else "🔴 Bad"
+        t.add_row("〰  Джиттер", f"[{c}]{j:.1f} мс[/{c}]", label)
+
     if "download_mbps" in result:
         mbps = result["download_mbps"]
         t.add_row("↓  Download", f"[bold cyan]{_fmt_speed(mbps)}[/bold cyan]", _quality(mbps))
@@ -567,14 +593,6 @@ def _print_results(result: dict) -> None:
 
     console.print(t)
     console.rule()
-
-
-def _quality(mbps: float) -> str:
-    if mbps >= 500: return "🚀 Огонь"
-    if mbps >= 100: return "✅ Отлично"
-    if mbps >= 50:  return "👍 Хорошо"
-    if mbps >= 10:  return "🆗 Норм"
-    return "🐌 Медленно"
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -589,30 +607,48 @@ Examples:
   python yaspeed.py --source-ip 192.168.1.5
   python yaspeed.py --interface eth0
   python yaspeed.py --interface "Wi-Fi"        # Windows
-  python yaspeed.py -t 8 -d 15
+  python yaspeed.py -t 8 -d 15                # 8 threads, 15 sec
   python yaspeed.py --no-upload
   python yaspeed.py --json > result.json
 """,
     )
+    p.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"yaspeed {__version__}",
+    )
+
     net = p.add_argument_group("Network / interface")
-    net.add_argument("--source-ip", metavar="IP",
-                     help="Bind outgoing traffic to a specific source IP")
-    net.add_argument("--interface", "-i", metavar="IFACE",
-                     help="Use a specific network interface (eth0 / Wi-Fi / en0 …)")
+    net.add_argument(
+        "--source-ip", metavar="IP",
+        help="Bind outgoing traffic to a specific source IP",
+    )
+    net.add_argument(
+        "--interface", "-i", metavar="IFACE",
+        help="Use a specific network interface  (eth0 / en0 / Wi-Fi / Ethernet …)",
+    )
 
     perf = p.add_argument_group("Test parameters")
-    perf.add_argument("--threads",    "-t", type=int, default=4,  metavar="N",
-                      help="Parallel streams (default: 4)")
-    perf.add_argument("--duration",   "-d", type=int, default=10, metavar="SEC",
-                      help="Duration of each test in seconds (default: 10)")
-    perf.add_argument("--ping-count",       type=int, default=12, metavar="N",
-                      help="Number of ping samples (default: 12)")
+    perf.add_argument(
+        "--threads",    "-t", type=int, default=4,  metavar="N",
+        help="Parallel streams (default: 4)",
+    )
+    perf.add_argument(
+        "--duration",   "-d", type=int, default=10, metavar="SEC",
+        help="Duration of each test in seconds (default: 10)",
+    )
+    perf.add_argument(
+        "--ping-count",       type=int, default=12, metavar="N",
+        help="Number of ping samples (default: 12)",
+    )
 
     out = p.add_argument_group("Output")
     out.add_argument("--no-download", action="store_true", help="Skip download test")
     out.add_argument("--no-upload",   action="store_true", help="Skip upload test")
-    out.add_argument("--json",        action="store_true",
-                     help="Output result as JSON (for scripting)")
+    out.add_argument(
+        "--json", action="store_true",
+        help="Output result as JSON (for scripting / monitoring)",
+    )
     return p
 
 
